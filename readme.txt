@@ -3,7 +3,7 @@ Contributors: tlovett1, tollmanz, taylorde, 10up, jakemgold, danielbachhuber, Ve
 Tags: http redirects, redirect manager, url redirection, safe http redirection, multisite redirects
 Requires at least: 3.1
 Tested up to: 4.5
-Stable tag: 1.7.8
+Stable tag: trunk
 
 Safely and easily manage your website's HTTP redirects.
 
@@ -23,6 +23,9 @@ Extract the zip file and just drop the contents in the wp-content/plugins/ direc
 2. This is the edit redirect page. Specify a "from" path, "to" path/URL, and a status code. You can schedule redirects for later dates just like posts.
 
 == Changelog ==
+
+= 1.7.9 (Nov. 25, 2018) =
+* Fix SQL injection bug in search functionality
 
 = 1.7.8 (Dec. 16, 2015) =
 * Fix SQL injection bug and no search terms warning

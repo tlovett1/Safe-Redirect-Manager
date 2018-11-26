@@ -4,7 +4,7 @@ Plugin Name: Safe Redirect Manager
 Plugin URI: http://www.10up.com
 Description: Easily and safely manage HTTP redirects.
 Author: Taylor Lovett (10up)
-Version: 1.7.8
+Version: 1.7.9
 Author URI: http://www.10up.com
 
 GNU General Public License, Free Software Foundation <http://creativecommons.org/licenses/GPL/2.0/>
@@ -29,6 +29,8 @@ if ( defined( 'WP_CLI' ) && WP_CLI )
     require_once dirname( __FILE__ ) . '/inc/wp-cli.php';
 
 class SRM_Safe_Redirect_Manager {
+
+    public $redirect_search_term;
 
     public $redirect_post_type = 'redirect_rule';
     private $redirect_nonce_name = 'srm_redirect_nonce';
@@ -80,12 +82,79 @@ class SRM_Safe_Redirect_Manager {
         add_action( 'admin_print_styles-post.php', array( $this, 'action_print_logo_css' ), 10, 1 );
         add_action( 'admin_print_styles-post-new.php', array( $this, 'action_print_logo_css' ), 10, 1 );
         add_filter( 'post_type_link', array( $this, 'filter_post_type_link' ), 10, 2  );
-
-        // Search filters
-        add_filter( 'posts_join', array( $this, 'filter_search_join' ) );
-        add_filter( 'posts_where', array( $this, 'filter_search_where' ) );
-        add_filter( 'posts_distinct', array( $this, 'filter_search_distinct' ) );
+        add_action( 'admin_init', array( $this, 'init_search_filters' ) );
     }
+
+    /**
+     * Setup search filters
+     */
+    public function init_search_filters() {
+        $redirect_capability = $this->get_redirect_capability();
+
+        if ( ! is_admin() ) {
+            return;
+        }
+
+        if ( ! current_user_can( $redirect_capability ) ) {
+            return;
+        }
+
+        add_action( 'pre_get_posts', array( $this, 'disable_core_search' ) );
+        add_filter( 'posts_clauses', array( $this, 'filter_search_clauses' ), 10, 2 );
+    }
+
+    /**
+     * We don't need core's fancy search functionality since we provide our own.
+     *
+     * @param  \WP_Query $query WP Query object
+     */
+    public function disable_core_search( $query ) {
+        if ( $query->is_search() && 'redirect_rule' === $query->get( 'post_type' ) ) {
+            // Store a reference to the search term for later use.
+            $this->redirect_search_term = $query->get( 's' );
+            // Don't let core build it's search clauses since we override them.
+            $query->set( 's', '' );
+        }
+    }
+
+    /**
+     * Build custom JOIN + WHERE clauses to do a more direct search through meta.
+     *
+     * @param  array    $clauses Array of SQL clauses
+     * @param  WP_Query $query WP_Query object
+     * @return array
+     */
+    public function filter_search_clauses( $clauses, $query ) {
+        global $wpdb;
+
+        if ( $this->redirect_search_term ) {
+            $search_term      = $this->redirect_search_term;
+            $search_term_like = '%' . $wpdb->esc_like( $search_term ) . '%';
+            $query->set( 's', $this->redirect_search_term );
+            unset( $this->redirect_search_term );
+            $clauses['distinct'] = 'DISTINCT';
+            $clauses['join'] .= " LEFT JOIN $wpdb->postmeta AS pm ON ($wpdb->posts.ID = pm.post_id) ";
+            $clauses['where'] = $wpdb->prepare(
+                "AND (
+                    (
+                        pm.meta_value LIKE %s
+                        AND pm.meta_key = '_redirect_rule_from'
+                    ) OR (
+                        pm.meta_value LIKE %s
+                        AND pm.meta_key = '_redirect_rule_to'
+                    )
+                )
+                AND $wpdb->posts.post_type = 'redirect_rule'
+                AND $wpdb->posts.post_status IN ( 'publish', 'future', 'draft', 'pending' )
+                ",
+                $search_term_like,
+                $search_term_like
+            );
+        }
+
+        return $clauses;
+    }
+
 
     /**
      * Localize plugin
@@ -96,106 +165,6 @@ class SRM_Safe_Redirect_Manager {
      */
     public function action_init_load_textdomain() {
         load_plugin_textdomain( 'safe-redirect-manager', false, basename( dirname( __FILE__ ) ) . '/languages' );
-    }
-
-    /**
-     * Join posts table with postmeta table on search
-     *
-     * @since 1.2
-     * @param string $join
-     * @uses get_query_var
-     * @return string
-     */
-    public function filter_search_join( $join ) {
-        global $wp_query;
-
-        if ( empty( $wp_query ) || $this->redirect_post_type != get_query_var( 'post_type' ) )
-            return $join;
-
-        global $wpdb;
-
-        $s = get_query_var( 's' );
-        if ( ! empty( $s ) ) {
-            $join .= " LEFT JOIN $wpdb->postmeta AS m ON ($wpdb->posts.ID = m.post_id) ";
-        }
-        return $join;
-    }
-
-    /**
-     * Return distinct search results
-     *
-     * @since 1.2
-     * @param string $distinct
-     * @uses get_query_var
-     * @return string
-     */
-    public function filter_search_distinct( $distinct ) {
-        global $wp_query;
-
-        if ( empty( $wp_query ) || $this->redirect_post_type != get_query_var( 'post_type' ) )
-            return $distinct;
-
-        return 'DISTINCT';
-    }
-
-    /**
-     * Join posts table with postmeta table on search
-     *
-     * @since 1.2
-     * @param string $where
-     * @uses is_search, get_query_var
-     * @return string
-     */
-    public function filter_search_where( $where ) {
-        global $wp_query;
-
-        if ( empty( $wp_query ) || $this->redirect_post_type != get_query_var( 'post_type' ) || ! is_search() || empty( $where ) )
-            return $where;
-
-        $terms = $this->get_search_terms();
-
-        if ( empty( $terms ) ) {
-            return $where;
-        }
-
-        $exact = get_query_var( 'exact' );
-        $n = ( ! empty( $exact ) ) ? '' : '%';
-
-        $search = '';
-        $seperator = '';
-        $search .= '(';
-
-        // we check the meta values against each term in the search
-        foreach ( $terms as $term ) {
-            $search .= $seperator;
-            // Used esc_sql instead of wpdb->prepare since wpdb->prepare wraps things in quotes
-            $search .= sprintf( "( ( m.meta_value LIKE '%s%s%s' AND m.meta_key = '%s') OR ( m.meta_value LIKE '%s%s%s' AND m.meta_key = '%s') )", $n, esc_sql( $term ), $n, esc_sql( $this->meta_key_redirect_from ), $n, esc_sql( $term ), $n, esc_sql( $this->meta_key_redirect_to ) );
-            
-            $seperator = ' OR ';
-        }
-
-        $search .= ')';
-
-        $where = preg_replace( '/\(\(\(.*?\)\)\)/is', '((' . $search . '))', $where );
-
-        return $where;
-    }
-
-    /**
-     * Get an array of search terms
-     *
-     * @since 1.2
-     * @uses get_query_var
-     * @return array
-     */
-    private function get_search_terms() {
-        $s = get_query_var( 's' );
-
-        if ( ! empty( $s ) ) {
-            preg_match_all( '/".*?("|$)|((?<=[\\s",+])|^)[^\\s",+]+/', stripslashes( $s ), $matches );
-            $search_terms = array_map( create_function( '$a', 'return trim( $a, "\\"\'\\n\\r " );' ), $matches[0] );
-        }
-        return $search_terms;
     }
 
     /**
@@ -702,6 +671,24 @@ class SRM_Safe_Redirect_Manager {
         }
 
         return $content;
+    }
+
+    /**
+     * Get required capability for managing redirects
+     *
+     * @return string
+     */
+    protected function get_redirect_capability() {
+        $redirect_capability = 'srm_manage_redirects';
+        $roles = array( 'administrator' );
+        foreach ( $roles as $role ) {
+            $role = get_role( $role );
+            if ( empty( $role ) || $role->has_cap( $redirect_capability ) ) {
+                continue;
+            }
+            $role->add_cap( $redirect_capability );
+        }
+        return apply_filters( 'srm_restrict_to_capability', $redirect_capability );
     }
 
     /**
